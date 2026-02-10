@@ -24,8 +24,8 @@ source_channel = 268196447667617803
 destination_channel = 448575039676088350
 specific_user_id = 231071537048846336
 
-# Define the maximum number of messages to copy
-max_messages = 100
+# Define the maximum number of messages to copy, if None then it is unlimited
+max_messages = None
 
 ######################################################################
 # check that the start time is in the format of MM/DD/YYYY HH:MM:SS 
