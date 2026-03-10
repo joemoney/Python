@@ -11,18 +11,20 @@ from pathlib import Path
 from datetime import datetime
 
 class AndroidBluetoothController:
-    def __init__(self, file_path, keyword, poll_interval=2, log_file=None):
+    def __init__(self, file_path, keyword, keyword2=None, poll_interval=2, log_file=None):
         """
         Initialize the Android Bluetooth Controller
         
         Args:
             file_path (str): Path to the text file to monitor (Tera Term output)
             keyword (str): First keyword to search for (triggers BT ON)
+            keyword2 (str): Second keyword to search for (log only)
             poll_interval (int): How often to check the file (seconds)
             log_file (str): Path to the log file (optional)
         """
         self.file_path = Path(file_path)
         self.keyword = keyword.lower()
+        self.keyword2 = keyword2.lower() if keyword2 else None
         self.poll_interval = poll_interval
         self.last_file_size = 0
         self.logger = self._setup_logging(log_file)
@@ -221,6 +223,15 @@ class AndroidBluetoothController:
             if self.keyword in line.lower():
                 return True, line
         return False, None
+
+    def check_keyword2_in_lines(self, lines):
+        """Check if second keyword exists in any of the lines"""
+        if not self.keyword2:
+            return False, None
+        for line in lines:
+            if self.keyword2 in line.lower():
+                return True, line
+        return False, None
     
     def run(self):
         """Main loop to monitor file and control Bluetooth"""
@@ -229,6 +240,8 @@ class AndroidBluetoothController:
         self.logger.info("=" * 60)
         self.logger.info(f"Monitoring file: {self.file_path}")
         self.logger.info(f"Keyword 1 (start connect): '{self.keyword}'")
+        if self.keyword2:
+            self.logger.info(f"Keyword 2 (log only): '{self.keyword2}'")
         self.logger.info(f"Poll interval: {self.poll_interval}s")
         self.logger.info("=" * 60)
         
@@ -260,6 +273,7 @@ class AndroidBluetoothController:
         try:
             total_cycles = 0
             last_trigger_line = None
+            last_keyword2_line = None
             last_keyword_time = time.time()
             
             while True:
@@ -269,6 +283,7 @@ class AndroidBluetoothController:
                 if last_lines:
                     # Check for first keyword
                     keyword_found, matching_line = self.check_keyword_in_lines(last_lines)
+                    keyword2_found, matching_line2 = self.check_keyword2_in_lines(last_lines)
                     # Keyword 1 detected -> Start BLE connect service
                     if keyword_found and matching_line != last_trigger_line:
                         total_cycles += 1
@@ -287,6 +302,10 @@ class AndroidBluetoothController:
                         # Start BLE connect service
                         self.start_connecting()
                         time.sleep(2)
+
+                    if keyword2_found and matching_line2 != last_keyword2_line:
+                        last_keyword2_line = matching_line2
+                        self.logger.info(f"Keyword 2 matched (log only): {matching_line2}")
 
                 # Timeout: no keyword for 10 minutes -> start connect service anyway
                 if time.time() - last_keyword_time >= 600:
@@ -339,6 +358,8 @@ Requirements:
     parser.add_argument('-k', '--keyword',
                        required=True,
                        help='First keyword to search for (triggers Bluetooth ON)')
+    parser.add_argument('-k2', '--keyword2',
+                       help='Second keyword to search for (log only)')
     parser.add_argument('-p', '--poll-interval',
                        type=int,
                        default=2,
@@ -359,6 +380,7 @@ Requirements:
     controller = AndroidBluetoothController(
         file_path=args.file,
         keyword=args.keyword,
+        keyword2=args.keyword2,
         poll_interval=args.poll_interval,
         log_file=args.log_file
     )

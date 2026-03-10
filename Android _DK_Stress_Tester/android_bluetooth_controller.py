@@ -7,6 +7,7 @@ import subprocess
 import time
 import os
 import logging
+import random
 from pathlib import Path
 from datetime import datetime
 
@@ -29,6 +30,7 @@ class AndroidBluetoothController:
         self.poll_interval = poll_interval
         self.timer_duration = timer_duration
         self.last_file_size = 0
+        self.last_read_offset = None
         self.logger = self._setup_logging(log_file)
     
     def _setup_logging(self, log_file):
@@ -157,7 +159,7 @@ class AndroidBluetoothController:
             return None
     
     def read_last_n_lines(self, n=5):
-        """Read the last N lines from the file (non-locking read for shared access)"""
+        """Read the last N lines from the file, starting at the newest line."""
         max_retries = 3
         retry_delay = 0.1
         
@@ -171,8 +173,8 @@ class AndroidBluetoothController:
                 with open(self.file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     # Read all lines
                     lines = f.readlines()
-                    # Return last N lines, stripped of whitespace
-                    return [line.strip() for line in lines[-n:] if line.strip()]
+                    # Return last N lines from newest to oldest, stripped of whitespace
+                    return [line.strip() for line in reversed(lines[-n:]) if line.strip()]
                     
             except PermissionError:
                 # File might be temporarily locked by the writing process
@@ -197,6 +199,58 @@ class AndroidBluetoothController:
                 return []
         
         return []
+
+    def read_new_lines(self):
+        """Read only newly appended lines since last poll (non-locking read for shared access)."""
+        max_retries = 3
+        retry_delay = 0.1
+
+        for attempt in range(max_retries):
+            try:
+                if not self.file_path.exists():
+                    return []
+
+                with open(self.file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    f.seek(0, os.SEEK_END)
+                    file_end = f.tell()
+
+                    if self.last_read_offset is None:
+                        self.last_read_offset = file_end
+                        return []
+
+                    if self.last_read_offset > file_end:
+                        self.last_read_offset = 0
+
+                    f.seek(self.last_read_offset)
+                    new_content = f.read()
+                    self.last_read_offset = f.tell()
+
+                    if not new_content:
+                        return []
+
+                    return [line.strip() for line in new_content.splitlines() if line.strip()]
+
+            except PermissionError:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    self.logger.warning(f"Permission denied reading file after {max_retries} attempts")
+                    return []
+
+            except (IOError, OSError) as e:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    self.logger.error(f"I/O error reading file: {e}")
+                    return []
+
+            except Exception as e:
+                self.logger.error(f"Error reading file: {e}")
+                return []
+
+        return []
     
     def check_keyword_in_lines(self, lines):
         """Check if keyword exists in any of the lines"""
@@ -211,6 +265,16 @@ class AndroidBluetoothController:
             if self.keyword2 in line.lower():
                 return True, line
         return False, None
+
+    def find_newest_keyword_match(self, lines):
+        """Return the newest matched line and which keyword matched first."""
+        for line in lines:
+            lower_line = line.lower()
+            if self.keyword in lower_line:
+                return 'keyword1', line
+            if self.keyword2 in lower_line:
+                return 'keyword2', line
+        return None, None
     
     def run(self):
         """Main loop to monitor file and control Bluetooth"""
@@ -265,13 +329,15 @@ class AndroidBluetoothController:
             timeout_2min_reached = False
             
             while True:
-                # Read last 5 lines
-                last_lines = self.read_last_n_lines(5)
+                # Read only newly appended lines since last poll
+                new_lines = self.read_new_lines()
                 
-                if last_lines:
-                    # Check for first keyword
-                    keyword_found, matching_line = self.check_keyword_in_lines(last_lines)
-                    keyword2_found, matching_line2 = self.check_keyword2_in_lines(last_lines)
+                if new_lines:
+                    newest_first_lines = list(reversed(new_lines))
+                    # Check only the newest matching line (newest-to-oldest)
+                    matched_keyword, matching_line = self.find_newest_keyword_match(newest_first_lines)
+                    keyword_found = matched_keyword == 'keyword1'
+                    keyword2_found = matched_keyword == 'keyword2'
                     
                     # Phase 1: Keyword 1 detected -> Turn ON Bluetooth
                     if keyword_found and not cycle_in_progress and not waiting_for_keyword2:
@@ -322,12 +388,18 @@ class AndroidBluetoothController:
                     
                     # Phase 2: Keyword 2 detected -> Start timer -> Turn OFF Bluetooth
                     elif keyword2_found and waiting_for_keyword2:
-                        self.logger.info(f"Keyword 2 matched: {matching_line2}")
+                        self.logger.info(f"Keyword 2 matched: {matching_line}")
                         
-                        # Wait timer duration before turning off
+                        # Wait timer duration before turning off (randomized between 4.5-5.0s with 100ms resolution if timer_duration is 5)
                         if self.timer_duration > 0:
-                            self.logger.info(f"⏱ Waiting {self.timer_duration} seconds before turning OFF Bluetooth...")
-                            time.sleep(self.timer_duration)
+                            if self.timer_duration == 5:
+                                # Randomize between 4.5 and 5.0 seconds with 100ms resolution
+                                timeout = random.randint(45, 50) / 10.0
+                                self.logger.info(f"⏱ Waiting {timeout:.1f} seconds before turning OFF Bluetooth...")
+                                time.sleep(timeout)
+                            else:
+                                self.logger.info(f"⏱ Waiting {self.timer_duration} seconds before turning OFF Bluetooth...")
+                                time.sleep(self.timer_duration)
                         
                         # Turn OFF Bluetooth
                         self.bluetooth_off()
